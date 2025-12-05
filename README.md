@@ -12,3 +12,5 @@ SLAMseq_220413: UPRTneg, DMSO, & MTZ, all n=4.
 SLAMseq_220728: CFP, UPRT_DMSO & UPRT_APAP, n=4.
 
 SLAMseq_230727: WT_UPRT & Nrf2-KO_UPRT, treated with either DMSO or APAP for 1 hour, all n=4.
+
+TUseq_220413: DMSO & MTZ, n=4.
