@@ -1,4 +1,4 @@
-# zebrafish
+l# zebrafish
 Scripts for analysis conducted in Tan, et al manuscript: https://doi.org/10.1016/j.devcel.2024.01.024 Experiments for which analysis scripts are included in this repo:
 
 ChIPseq_230727: HepG2 +/- APAP for 24 hours, n=3
@@ -11,4 +11,4 @@ SLAMseq_220413: UPRTneg, DMSO, & MTZ, all n=4.
 
 SLAMseq_220728: CFP, UPRT_DMSO & UPRT_APAP, n=4.
 
-SLAMseq_230727:
+SLAMseq_230727: WT_UPRT & Nrf2-KO_UPRT, treated with either DMSO or APAP for 1 hour, all n=4.
