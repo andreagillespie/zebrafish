@@ -1,0 +1,759 @@
+---
+title: "Vicky adult zebrafish SLAM-Seq Analysis 2021 October"
+date: "10/22/2021"
+output: html_notebook
+---
+
+
+# Experimental design:
+Adult Zebrafish WT_UPRT with and without APAP treatment
+Control WT CFP only with DMSO
+1/3/6 hr runs for APAP and DMSO samples
+All samples spiked in with S2 cells
+Information files under sample_info folder
+
+# Location of files:
+Run:
+/pipeline/Runs/NextSeq/211001_NB501056_0697_AHJHLYBGXK/ProjectFolders/Project_Vicky-Tan/
+
+# References from larval SLAMseq can be used in running SLAM-Seq pipeline 
+# found in: /dawson_genomics/Projects/zebrafish/SLAMSeq/210922_NB501056_0694_AHJJHWBGXK/reference_files
+
+# set dirs and create as needed
+```{r}
+slam.dir <- '/dawson_genomics/Projects/zebrafish/SLAMSeq'
+project.dir <- file.path(slam.dir, "211001_NB501056_0697_AHJHLYBGXK")
+reference.dir <- file.path(slam.dir, "210922_NB501056_0694_AHJJHWBGXK/reference_files")
+align.dir <- file.path(project.dir, "alignment")
+logs.dir <- file.path(project.dir, "logs")
+plots.dir <- file.path(project.dir, "plots")
+results.dir <- file.path(project.dir, "results")
+sample.dir <- file.path(project.dir, "sample_info")
+session.dir <- file.path(project.dir, "session_info")
+tsv.dir <- file.path(align.dir, 'collapse/tsv')
+
+dir.create(align.dir)
+dir.create(logs.dir)
+dir.create(plots.dir)
+dir.create(results.dir)
+dir.create(session.dir)
+
+setwd(project.dir)
+```
+
+
+slam.sbatch file
+```{bash, eval = FALSE}
+#!/bin/bash
+ 
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --mem-per-cpu=40G
+#SBATCH --time=0-12:00:00
+#SBATCH --output=../logs/slam%j.stdout
+#SBATCH --error=../logs/slam%j.err
+#SBATCH --mail-user=andrea.gillespie@petermac.org
+#SBATCH --mail-type=END
+#SBATCH --job-name="slam"
+
+module load slamdunk
+module load fastqc
+
+bname=`basename $1 _R1_001.fastq.gz`
+rl=75
+Ref=/data/reference/dawson_labs/joint_genomes/Dm6Dr11/Dm6Dr11mCherry.fa
+utr=/dawson_genomics/Projects/zebrafish/SLAMSeq/210922_NB501056_0694_AHJJHWBGXK/GRCz11Dm6mCherryallutrmerge.bed
+
+mkdir ${bname}
+
+java -jar /config/binaries/trimmomatic/0.39/trimmomatic-0.39.jar SE -threads 1 -phred33 $1 ${bname}/${bname}.trim.fq.gz ILLUMINACLIP:/config/binaries/trimmomatic/0.39/adapters/TruSeq3-SE.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36
+
+#fastqc $1
+
+fastqc ${bname}/${bname}.trim.fq.gz
+
+srun -n 1 slamdunk all -r $Ref -b $utr -fb $utr -o ${bname}slamout -5 12 -n 100 -t 8 -m -mv 0.2 -mts -mbq 27 -rl $rl ${bname}/${bname}.trim.fq.gz
+
+srun -n 1 alleyoop collapse -o collapse/ -t 1 ${bname}slamout/count/*tcount.tsv &
+
+srun -n 1 alleyoop snpeval -o ${bname}slamout/ -s ${bname}slamout/snp/ -r $Ref -b $utr -l $rl -t 1 ${bname}slamout/filter/*_slamdunk_mapped_filtered.bam &
+srun -n 1 alleyoop rates -o ${bname}slamout/ -r $Ref -t 1 ${bname}slamout/filter/*_slamdunk_mapped_filtered.bam &
+srun -n 1 alleyoop tccontext -o ${bname}slamout/ -r $Ref -t 1 ${bname}slamout/filter/*_slamdunk_mapped_filtered.bam &
+srun -n 1 alleyoop tcperutrpos -o ${bname}slamout/ -r $Ref -b $utr -s ${bname}slamout/snp/ -l $rl -t 1 ${bname}slamout/filter/*_slamdunk_mapped_filtered.bam &
+srun -n 1 alleyoop tcperreadpos -o ${bname}slamout/ -r $Ref -s ${bname}slamout/snp/ -l $rl -t 1 ${bname}slamout/filter/*_slamdunk_mapped_filtered.bam &
+srun -n 1 alleyoop utrrates -o ${bname}slamout/ -r $Ref -l $rl -t 1 -b $utr ${bname}slamout/filter/*_slamdunk_mapped_filtered.bam &
+
+wait
+```
+
+Run 1
+Slam-seq samples through slam.sbatch from alignment dir
+```{bash, eval = F}
+cd alignment
+
+for fq in /pipeline/Runs/NextSeq/211001_NB501056_0697_AHJHLYBGXK/ProjectFolders/Project_Vicky-Tan/*/*.fastq.gz
+do sbatch ../slamGRCz11211001.sbatch $fq
+done
+```
+
+# run multiqc on fastqc and slamseq files
+```{bash}
+# still in align dir
+module load multiqc/1.8
+multiqc .
+```
+
+# After the alignments are done there is a collapse folder with all the counts
+
+# Change collapse .csv files to .tsv
+```{bash, eval = F}
+cd collapse
+mkdir tsv
+for file in *.csv; do cp "$file" tsv/"${file%.csv}.tsv"; done
+```
+
+# Read in slam-dunk collapse counts files
+
+Slamdunk Tcount file format:
+col1 is entrez geneID
+col3 is RPM
+col8 is total count
+col9 is TC count
+
+Loading and reading in files
+```{r}
+# back to proj dir
+setwd(project.dir)
+
+library(edgeR)
+files <- list.files(tsv.dir, pattern="*.tsv$")
+sample_sheet <- read_excel("sample_info/2021-09-03_Adult SLAMitseq.xlsx")
+
+samples_mch = data.frame(
+  "files" = files, 
+  "samples" = gsub(".trim.fq_slamdunk_mapped_filtered_tcount_collapsed.tsv", "", files), 
+  "time" = gsub("h", "", sample_sheet$Other_Conditions), 
+  "treatment" = sample_sheet$Treatment,
+  "cells" = sample_sheet$`Cell type/line`
+  )
+
+# sequencing and sample information
+counts_mch = readDGE(
+  file = files, 
+  path = tsv.dir, 
+  columns=c(1,8), 
+  group=samples_mch$samples
+  )
+
+TCcounts_mch = readDGE(
+  file = files,
+  path = tsv.dir,
+  columns=c(1,9), 
+  group=samples_mch$samples
+  )
+
+RPM_mch = readDGE(
+  files = files,
+  path = tsv.dir,
+  columns=c(1,3), 
+  group=samples_mch$samples
+  )
+
+# cleaning up names
+row.names(counts_mch$samples) <- gsub(".trim.fq_slamdunk_mapped_filtered_tcount_collapsed", "", row.names(counts_mch$samples))
+row.names(TCcounts_mch$samples) <- gsub(".trim.fq_slamdunk_mapped_filtered_tcount_collapsed", "", row.names(TCcounts_mch$samples))
+colnames(counts_mch$counts) <- gsub(".trim.fq_slamdunk_mapped_filtered_tcount_collapsed", "", colnames(counts_mch$counts))
+colnames(TCcounts_mch$counts) <- gsub(".trim.fq_slamdunk_mapped_filtered_tcount_collapsed", "", colnames(TCcounts_mch$counts))
+```
+
+# write out raw counts
+```{r}
+raw_counts = counts_mch$counts
+raw_TCcounts = TCcounts_mch$counts
+
+write.table(
+  raw_counts, 
+  "results/counts_raw_all.txt",
+  sep="\t",
+  quote=F
+  )
+
+write.table(
+  raw_TCcounts, 
+  "results/TCcounts_raw_all.txt",
+  sep="\t",
+  quote=F
+  )
+```
+
+# Probably a good place to separate out the zebrafish and drosphila reads
+# Then analyse the drosphila and zebrafish separatly until the normalisation.
+# apply the normalisation factors from the drosophila to the zebrafish, then continue with DE with or without the drosophila normalisation factor as a comparison.
+
+# separate organisms counts objects and make list for looping
+```{r}
+dros <- which(substr(rownames(counts_mch), 1, 4) == "FBgn")
+
+dros.counts <- counts_mch[dros, ]
+zeb.counts <- counts_mch[-dros, ]
+dros.TCcounts <- TCcounts_mch[dros, ]
+zeb.TCcounts <- TCcounts_mch[-dros, ]
+
+counts.obs <- list(zeb.counts, dros.counts, zeb.TCcounts, dros.TCcounts)
+names(counts.obs) <- c("zeb_counts", "dros_counts", "zeb_TCcounts", "dros_TCcounts")
+```
+
+# Filtering out counts of genes with low counts
+```{r}
+# init variable for cpms list
+counts.cpms.list <- list()
+
+# loop through both counts objects to apply same filtering to both
+for(counts.i in 1:length(counts.obs)){
+  colSums(counts.obs[[counts.i]]$counts)
+  noint = rownames(counts.obs[[counts.i]]) %in% c("__no_feature", "__ambiguous", "__too_low_aQual","__not_aligned","__alignment_not_unique")
+  table(noint)
+  counts.cpms.list[[counts.i]] = cpm(counts.obs[[counts.i]])
+  keep = rowSums(counts.cpms.list[[counts.i]] >1) >=3 & !noint
+  counts.obs[[counts.i]] = counts.obs[[counts.i]][keep,]
+  dim(counts.obs[[counts.i]]$counts)
+}
+
+# same names for new  list
+names(counts.cpms.list) <- names(counts.obs)
+```
+
+
+# Save and annotate zebrafish count files
+```{r}
+counts.names <- c(rep("counts", 2), rep("TCcounts", 2))
+
+library(biomaRt)
+library(dplyr)
+Drensembl=useMart(host='asia.ensembl.org', biomart='ENSEMBL_MART_ENSEMBL', dataset='drerio_gene_ensembl')
+
+for(i in c(1, 3)){
+  write.table(
+    counts.obs[[i]]$counts,
+    file.path(results.dir, paste0(counts.names[[i]], "_filtered_zebrafish_mCherry.txt")),
+    sep="\t",
+    quote=F
+    )
+
+  # Zebrafish annotation
+  zfish_genes=getBM(
+    attributes=c("ensembl_gene_id","zfin_id_symbol","entrezgene_id"),
+    filters = "ensembl_gene_id",
+    values=rownames(counts.cpms.list[[i]]),
+    mart=Drensembl
+    )
+  zfish_genesnodup = zfish_genes[!duplicated(zfish_genes$ensembl_gene_id),]
+  EnsGenes = data.frame(
+    "zeb.cpm.ensg" = rownames(counts.cpms.list[[i]])
+    )
+  genesAnno <- left_join(
+    EnsGenes,
+    zfish_genesnodup,
+    by=c("zeb.cpm.ensg"="ensembl_gene_id")
+    )
+  colnames(genesAnno)=c("zfish_ensembl_gene_id","zfin_id_symbol","zfish_entrez")
+  counts.cpms.list[[i]] = as.data.frame(counts.cpms.list[[i]])
+  counts.cpms.list[[i]]$zfin_id_symbol <- genesAnno$zfin_id_symbol
+
+  write.table(
+    counts.cpms.list[[i]],
+    file.path(results.dir, paste0(counts.names[[i]], "_cpms_filtered_zebrafish_mCherry.txt")),
+    sep = '\t',
+    quote = F
+    )  
+}
+```
+
+Read saved counts
+```{r}
+counts = read.delim(file = "results/counts_filtered_zebrafish_mCherry.txt",sep="\t")
+TCcounts = read.delim(file = "results/TCcounts_filtered_zebrafish_mCherry.txt",sep="\t")
+```
+
+# Plot count numbers
+```{r}
+pdf(file = file.path(plots.dir, "barplots_summary.pdf"), width = 6, height = 4)
+barplot(colSums(counts), las=2, main="total reads")
+barplot(colSums(TCcounts), las=2, main="TC reads")
+barplot(colSums(TCcounts)/colSums(counts)*100, las=2, main="percentage TC")
+dev.off()
+```
+
+# make table of TC%
+```{r}
+TC.table <- data.frame(
+  "sample.names" = colnames(TCcounts), 
+  "percent.TC" = colSums(TCcounts)/colSums(counts)*100
+  )
+write.table(
+  TC.table, 
+  file.path(results.dir, "all_sample_percent_TC.txt"),
+  sep ="\t",
+  col.names = T,
+  row.names = F,
+  quote = F
+  )
+```
+
+# Making DGE list object 
+
+## counts
+```{r}
+group = paste(samples_mch$cells, samples_mch$treatment, samples_mch$time, sep = "_")
+
+d.counts.obs <- list()
+
+for(i in 1:length(counts.obs)){
+  d.counts.obs[[i]] = DGEList(counts=counts.obs[[i]], group = group)
+  d.counts.obs[[i]]$samples$treatment = samples_mch$treatment
+  d.counts.obs[[i]]$samples$time = samples_mch$time
+  d.counts.obs[[i]]$samples$cells = samples_mch$cells
+
+}
+
+# use same naming convention
+names(d.counts.obs) <- names(counts.obs)
+```
+
+# Boxplot of library sizes (un-normalised)
+```{r}
+pdf(file ="plots/barplots_librarysize.pdf", width = 6, height = 4)
+barplot(
+  d.counts.obs[["zeb_counts"]]$samples$lib.size,
+  names=colnames(d.counts.obs[["zeb_counts"]]),
+  las=2, 
+  main = "Library sizes (counts)"
+  )
+barplot(
+  d.counts.obs[["zeb_TCcounts"]]$samples$lib.size,
+  names=colnames(d.counts.obs[["zeb_TCcounts"]]),
+  las=2, 
+  main = "Library sizes (TC counts)"
+  )
+dev.off()
+```
+
+# Analyse different normalisation methods that can be used, for zebrafish and drosophila spike-in
+# default is TMM in edgeR
+```{r}
+# function for plotting normalisation 
+BarPlotOfNorm = function(X, Y) {
+  ScaleFactors <- X$samples$lib.size * X$samples$norm.factors
+  Exp <- round(t(t(X$counts)/ScaleFactors) * mean(ScaleFactors))
+  return (Bplot = barplot(log2(Exp+1), main=Y, las=2))}
+
+# initiate norm lists
+d.counts.tmm <- list()
+d.counts.UQ <- list()
+d.counts.RLE <- list()
+d.counts.none <- list()
+
+for(i in 1:length(d.counts.obs)){
+    # counts
+    d.counts.tmm[[i]] = calcNormFactors(d.counts.obs[[i]], method="TMM")
+    d.counts.UQ[[i]] = calcNormFactors(d.counts.obs[[i]], method="upperquartile") #Calculating UpperQuartile normalisation
+    d.counts.RLE[[i]] = calcNormFactors(d.counts.obs[[i]], method="RLE")
+    d.counts.none[[i]] = calcNormFactors(d.counts.obs[[i]], method="none")
+
+    pdf(
+        file.path(plots.dir, paste0("barplots_normalisation_", names(d.counts.obs)[[i]], ".pdf")), 
+        width = 6, height = 4
+        )
+    par(mfrow=c(2,2))
+    BarPlotOfNorm(d.counts.tmm[[i]], "TMM")
+    BarPlotOfNorm(d.counts.UQ[[i]], "UpperQ")
+    BarPlotOfNorm(d.counts.RLE[[i]], "RLE")
+    BarPlotOfNorm(d.counts.none[[i]], "No normalisation")
+    dev.off()
+}
+
+#Viewing normalisation factors for TMM and RLE for zebrafish & drsophila counts
+norm.table <- data.frame(
+  "zeb_counts_tmm" = d.counts.tmm[[1]]$samples$norm.factors,
+  "zeb_counts_rle" = d.counts.RLE[[1]]$samples$norm.factors,
+  "dros_counts_tmm" = d.counts.tmm[[2]]$samples$norm.factors,
+  "dros_counts_rle" = d.counts.RLE[[2]]$samples$norm.factors
+)
+norm.table
+
+# tmm norm looks best to use in adults and larvae, set names for clarity
+names(d.counts.tmm) <- names(counts.obs)
+names(d.counts.RLE) <- names(counts.obs)
+```
+
+# Add gene annotations to counts obj
+```{r}
+d.counts.obs[["zeb_counts"]]$genes <- genesAnno
+```
+
+# MDS plot
+```{r}
+library(RColorBrewer)
+# Setting colours
+col.group <- d.counts.obs[["zeb_counts"]]$samples$group
+levels(col.group) <- brewer.pal(nlevels(col.group), "Set1") 
+col.group <- as.character(col.group)
+
+MDS = plotMDS(
+  d.counts.obs[["zeb_counts"]],
+  labels=d.counts.obs[["zeb_counts"]]$samples$group, col = col.group
+  )
+
+# add names to investigate potential outlier
+pdf(file.path(plots.dir, "MDS_adult_raw_counts.odf"))
+MDS = plotMDS(
+  d.counts.obs[["zeb_counts"]],
+  labels=rownames(d.counts.obs[["zeb_counts"]]$samples), 
+  main = "Adult raw counts",
+  col = col.group
+  )
+dev.off()
+```
+
+```{r}
+# examine MDS w/o outlier
+col.group_s16rmvd <- d.counts.obs[["zeb_counts"]]$samples$group[-16]
+levels(col.group_s16rmvd) <- brewer.pal(nlevels(col.group_s16rmvd), "Set1") 
+col.group_s16rmvd <- as.character(col.group_s16rmvd)
+
+pdf(file.path(plots.dir, "MDS_adult_raw_counts_s16rmvd.pdf"))
+MDS = plotMDS(
+  d.counts.obs[["zeb_counts"]][,-16],
+  labels=rownames(d.counts.obs[["zeb_counts"]]$samples)[-16],
+  main = "Adult raw counts S16 removed",
+  col = col.group_s16rmvd
+  )
+dev.off()
+```
+
+# MDS plot TC counts
+```{r}
+library(RColorBrewer)
+# Setting colours
+col.group <- d.counts.obs[["zeb_TCcounts"]]$samples$group
+levels(col.group) <- brewer.pal(nlevels(col.group), "Set1") 
+col.group <- as.character(col.group)
+
+MDS = plotMDS(
+  d.counts.obs[["zeb_TCcounts"]],
+  labels=d.counts.obs[["zeb_TCcounts"]]$samples$group, col = col.group
+  )
+
+# add names to investigate potential outlier
+pdf(file.path(plots.dir, "MDS_adult_raw_TCcounts.pdf"))
+MDS = plotMDS(
+  d.counts.obs[["zeb_TCcounts"]],
+  labels=rownames(d.counts.obs[["zeb_TCcounts"]]$samples), 
+  main = "Adult raw TC counts",
+  col = col.group
+  )
+dev.off()
+```
+
+# Use drosophila TMM as normalisation factor
+```{r}
+# set zebrafish counts and TCcounts norm factor to dros tmm norm factor
+d.counts.tmm[["zeb_counts"]]$samples$norm.factors <- d.counts.tmm[["dros_counts"]]$samples$norm.factors
+d.counts.tmm[["zeb_TCcounts"]]$samples$norm.factors <- d.counts.tmm[["dros_counts"]]$samples$norm.factors
+```
+
+# MDS for normalised data
+```{r}
+library(RColorBrewer)
+# Setting colours
+col.group <- d.counts.tmm[["zeb_counts"]]$samples$group
+levels(col.group) <- brewer.pal(nlevels(col.group), "Set1") 
+col.group <- as.character(col.group)
+
+MDS = plotMDS(
+  d.counts.tmm[["zeb_counts"]],
+  labels=d.counts.tmm[["zeb_counts"]]$samples$group, col = col.group
+  )
+```
+
+# MDS of normalised TCcounts
+```{r}
+library(RColorBrewer)
+# Setting colours
+col.group <- d.counts.tmm[["zeb_TCcounts"]]$samples$group
+levels(col.group) <- brewer.pal(nlevels(col.group), "Set1") 
+col.group <- as.character(col.group)
+
+MDS = plotMDS(
+  d.counts.tmm[["zeb_TCcounts"]],
+  labels=d.counts.tmm[["zeb_TCcounts"]]$samples$group, col = col.group
+  )
+```
+
+# MDS for zebrafish normalised data
+```{r}
+library(RColorBrewer)
+# Setting colours
+col.group <- d.counts.RLE[["zeb_counts"]]$samples$group
+levels(col.group) <- brewer.pal(nlevels(col.group), "Set1") 
+col.group <- as.character(col.group)
+
+MDS = plotMDS(
+  d.counts.RLE[["zeb_counts"]],
+  labels=d.counts.RLE[["zeb_counts"]]$samples$group, col = col.group
+  )
+```
+
+# MDS for zebrafish normalised data
+```{r}
+library(RColorBrewer)
+# Setting colours
+col.group <- d.counts.RLE[["zeb_TCcounts"]]$samples$group
+levels(col.group) <- brewer.pal(nlevels(col.group), "Set1") 
+col.group <- as.character(col.group)
+
+MDS = plotMDS(
+  d.counts.RLE[["zeb_TCcounts"]],
+  labels=d.counts.RLE[["zeb_TCcounts"]]$samples$group, col = col.group
+  )
+```
+
+# set design and contrasts for DE
+```{r}
+# design table
+design = model.matrix(~0+group, data = d.counts.obs[["zeb_counts"]]$samples)
+colnames(design) <- gsub("group", colnames(design), replacement = "")
+design
+
+contr.matrix <- makeContrasts(
+  APAP3vsDMSO3_WT = WT_UPRT_APAP_3-WT_UPRT_DMSO_3,
+  APAP6vsDMSO6_WT = WT_UPRT_APAP_6-WT_UPRT_DMSO_6,
+  APAP1vsDMSO1_WT = WT_UPRT_APAP_1-WT_UPRT_DMSO_1,
+  APAP6vsAPAP3_WT = WT_UPRT_APAP_6-WT_UPRT_APAP_3,
+  APAP3vsAPAP1_WT = WT_UPRT_APAP_3-WT_UPRT_APAP_1,
+  APAP6vsAPAP1_WT = WT_UPRT_APAP_6-WT_UPRT_APAP_1,
+  WT_UPRTvsWT_CFP_DMSO6 = WT_UPRT_DMSO_6-WT_CFP_DMSO_6,
+  levels = colnames(design)
+  )
+contr.matrix
+```
+
+EdgeR estimate dispersions 
+```{r}
+# est disp for zebrafish counts
+d_zeb_counts=estimateDisp(d.counts.tmm[["zeb_counts"]], design)
+
+# est disp for zebrafish TCcounts
+d_zeb_TCcounts=estimateDisp(d.counts.tmm[["zeb_TCcounts"]], design)
+```
+
+# check out voom analysis first
+
+# For counts
+MA plots
+```{r}
+v_zeb_counts = voom(d_zeb_counts, design, plot= T)
+vfit_zeb_counts <- lmFit(v_zeb_counts, design)
+vfit_zeb_counts <- contrasts.fit(vfit_zeb_counts, contrasts=contr.matrix)
+efit_zeb_counts <- eBayes(vfit_zeb_counts)
+plotSA(efit_zeb_counts)
+```
+
+
+Summary of contrasts
+```{r}
+summary(decideTests(efit_zeb_counts))
+```
+
+Summary of contrasts with logFC greater than 1
+```{r}
+tfit_zeb_counts <- treat(vfit_zeb_counts, lfc=1)
+dt_zeb_counts <- decideTests(tfit_zeb_counts)
+summary(dt_zeb_counts)
+```
+
+# DE genes
+```{r}
+# initialise list
+contrast.list <- list()
+
+#set and make DE dir
+de.dir <- file.path(results.dir, "DE")
+dir.create(de.dir)
+voom.dir <- file.path(de.dir, "voom")
+dir.create(voom.dir)
+
+for(contrast.i in 1:length(colnames(contr.matrix))){
+  contrast.list[[contrast.i]] <- topTreat(tfit_zeb_counts, coef=contrast.i, n=Inf)
+  contrast.list[[contrast.i]]$ensg <- rownames(contrast.list[[contrast.i]])
+  contrast.list[[contrast.i]] <- merge(contrast.list[[contrast.i]], genesAnno, by.x = "ensg", by.y = "zfish_ensembl_gene_id")
+  write.table(
+    contrast.list[[contrast.i]],
+    file.path(voom.dir, paste0(colnames(contr.matrix)[[contrast.i]], "_Counts.txt")),
+    sep="\t",
+    quote=F,
+    row.names = F,
+    col.names = T
+    )
+}
+
+names(contrast.list) <- colnames(contr.matrix)
+```
+
+
+# For TCcounts
+MA plots
+```{r}
+v_zeb_TCcounts = voom(d_zeb_TCcounts, design, plot= T)
+vfit_zeb_TCcounts <- lmFit(v_zeb_TCcounts, design)
+vfit_zeb_TCcounts <- contrasts.fit(vfit_zeb_TCcounts, contrasts=contr.matrix)
+efit_zeb_TCcounts <- eBayes(vfit_zeb_TCcounts)
+plotSA(efit_zeb_TCcounts)
+```
+
+Summary of contrasts (number of DE genes)
+```{r}
+summary(decideTests(efit_zeb_TCcounts))
+```
+
+Summary of contrasts with logFC greater than 1
+```{r}
+tfit_zeb_TCcounts <- treat(vfit_zeb_TCcounts, lfc=1)
+dt_zeb_TCcounts <- decideTests(tfit_zeb_TCcounts)
+summary(dt_zeb_TCcounts)
+```
+
+# DE 
+```{r}
+# initialise list
+TC.contrast.list <- list()
+
+for(contrast.i in 1:length(colnames(contr.matrix))){
+  TC.contrast.list[[contrast.i]] <- topTreat(tfit_zeb_TCcounts, coef=contrast.i, n=Inf)
+  TC.contrast.list[[contrast.i]]$ensg <- rownames(TC.contrast.list[[contrast.i]])
+  TC.contrast.list[[contrast.i]] <- merge(TC.contrast.list[[contrast.i]], genesAnno, by.x = "ensg", by.y = "zfish_ensembl_gene_id")
+  write.table(
+    TC.contrast.list[[contrast.i]],
+    file.path(voom.dir, paste0(colnames(contr.matrix)[[contrast.i]], "_TCCounts.txt")),
+    sep="\t",
+    quote=F,
+    row.names = F,
+    col.names = T
+    )
+}
+
+names(TC.contrast.list) <- colnames(contr.matrix)
+```
+
+MA plots
+```{r}
+voom.ma.dir <- file.path(plots.dir, "voom_MAplots")
+dir.create(voom.ma.dir)
+for(contrast.i in 1:length(TC.contrast.list)){
+  pdf(file.path(voom.ma.dir, paste0(colnames(tfit_zeb_TCcounts)[contrast.i], "_MAplot.pdf")))
+  plotMD(
+    tfit_zeb_TCcounts, 
+    column=contrast.i, 
+    status=dt_zeb_TCcounts[,contrast.i],
+    main=colnames(tfit_zeb_TCcounts)[contrast.i], 
+    xlim=c(0,13)
+    )
+  dev.off()
+}
+```
+
+
+# also look at edgeR DE for counts
+```{r}
+gfit_zeb_counts <- glmQLFit(d_zeb_counts, design)
+edger.dir <- file.path(de.dir, "edger")
+dir.create(edger.dir)
+ftest.counts.list <- list()
+
+for(contrast.i in 1:length(colnames(contr.matrix))){
+
+  ftest.counts.list[[contrast.i]] <- glmQLFTest(gfit_zeb_counts, contrast = contr.matrix[ , contrast.i])
+  ftest.counts.list[[contrast.i]]$table$ensg <- rownames(ftest.counts.list[[contrast.i]]$table)
+  ftest.counts.list[[contrast.i]]$table <- merge(ftest.counts.list[[contrast.i]]$table, genesAnno, by.x = "ensg", by.y = "zfish_ensembl_gene_id")
+  # write ftest table
+  write.table(
+    ftest.counts.list[[contrast.i]]$table,
+    file.path(edger.dir, paste0(colnames(contr.matrix)[contrast.i], "_counts_ftest_table.txt")),
+    sep = "\t",
+    quote = F,
+    col.names = T,
+    row.names= F
+  )
+}
+```
+
+# for TC counts
+```{r}
+gfit_zeb_TCcounts <- glmQLFit(d_zeb_TCcounts, design)
+ftest.TCcounts.list <- list()
+for(contrast.i in 1:length(colnames(contr.matrix))){
+
+  ftest.TCcounts.list[[contrast.i]] <- glmQLFTest(gfit_zeb_TCcounts, contrast = contr.matrix[ , contrast.i])
+  ftest.TCcounts.list[[contrast.i]]$table$ensg <- rownames(ftest.TCcounts.list[[contrast.i]]$table)
+  ftest.TCcounts.list[[contrast.i]]$table <- merge(ftest.TCcounts.list[[contrast.i]]$table, genesAnno, by.x = "ensg", by.y = "zfish_ensembl_gene_id")
+  # write ftest table
+  write.table(
+    ftest.TCcounts.list[[contrast.i]]$table,
+    file.path(edger.dir, paste0(colnames(contr.matrix)[contrast.i], "_TCcounts_ftest_table.txt")),
+    sep = "\t",
+    quote = F,
+    col.names = T,
+    row.names= F
+  )
+}
+
+# add names for referencing
+names(ftest.TCcounts.list) <- colnames(contr.matrix)
+```
+
+# MA plots
+```{r}
+edger.ma.dir <- file.path(plots.dir, "edger_MAplots")
+dir.create(edger.ma.dir)
+for(contrast.i in 1:length(colnames(contr.matrix))){
+  pdf(file.path(edger.ma.dir, paste0(colnames(contr.matrix)[contrast.i], "_MAplot.pdf")))
+  maPlot(
+    logAbundance = ftest.TCcounts.list[[contrast.i]]$table$logCPM,
+    logFC = ftest.TCcounts.list[[contrast.i]]$table$logFC,
+    main = colnames(contr.matrix)[contrast.i],
+    xlab = expression(bold(paste("log"[2], " CPM"))),
+    ylab = expression(bold(paste("log"[2], " FC"))),
+    col = "black",
+    allCol ="red",
+    lowess = T
+  )
+  dev.off()
+}
+```
+
+# get human orthologs of zebrafish genes
+```{r}
+Hsensembl=useMart(
+  host="https://asia.ensembl.org", 
+  biomart='ENSEMBL_MART_ENSEMBL',
+  dataset='hsapiens_gene_ensembl'
+  )
+
+hum_zeb_link=getLDS(
+  attributes = c("ensembl_gene_id", "hgnc_symbol", "entrezgene_id"), 
+  mart = Hsensembl,
+  attributesL = c("ensembl_gene_id","zfin_id_symbol","entrezgene_id"),
+  martL = Drensembl
+  )
+
+colnames(hum_zeb_link) <- c("human_ensembl_id", "human_symbol", "human_entrez",  "zfish_ensembl_id", "zfin_symbol", "zfish_entrez")
+```
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(session.dir, paste0(Sys.Date(), "_slamseq_analysis_2110.txt"))
+)
+```
