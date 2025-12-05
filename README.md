@@ -7,4 +7,8 @@ SLAMseq_210922: WT_CFP w/ 6 hours DMSO, WT_UPRT & Nrf2-KO_UPRT both treated w/ e
 
 SLAMseq_211001: WT_CFP w/ 6hrs DMSO, WT_UPRT w/ either DMSO or APAP for either 1, 3, or 6 hours, all n=3.
 
-SLAMseq_220413: 
+SLAMseq_220413: UPRTneg, DMSO, & MTZ, all n=4.
+
+SLAMseq_220728:
+
+SLAMseq_230727:
